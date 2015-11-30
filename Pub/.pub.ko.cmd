@@ -1,0 +1,1 @@
+cmd_/home/javier/sistemas_operativos/Modules2015-2/Pub/pub.ko := ld -r -m elf_x86_64 -T ./scripts/module-common.lds --build-id  -o /home/javier/sistemas_operativos/Modules2015-2/Pub/pub.ko /home/javier/sistemas_operativos/Modules2015-2/Pub/pub.o /home/javier/sistemas_operativos/Modules2015-2/Pub/pub.mod.o

@@ -1,0 +1,1 @@
+cmd_/home/javier/sistemas_operativos/Modules2015-2/Pub/pub.o := ld -m elf_x86_64   -r -o /home/javier/sistemas_operativos/Modules2015-2/Pub/pub.o /home/javier/sistemas_operativos/Modules2015-2/Pub/kmutex.o /home/javier/sistemas_operativos/Modules2015-2/Pub/pub-impl.o 
