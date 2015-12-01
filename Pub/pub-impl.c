@@ -55,6 +55,11 @@ static ssize_t curr_size_v;
 static int damas;
 static int varones;
 
+static int damas_pos;
+static int varones_pos;
+
+// TODO el ejemplo falla en (14) se llega a damas negativo. Me tinca que algo incorrecto esta pasando en epilog dado que se debe a una interrupcion antes de tiempo
+// Se deberia actualziar el valor de dmas o varones en epilog?
 
 /* El mutex y la condicion para escribir */
 static KMutex mutex;
@@ -74,6 +79,8 @@ int bano_init(void) {
   varones = 0;
   curr_size_d = 0;
   curr_size_v = 0;
+  damas_pos = 0;
+  varones_pos = 0;
   m_init(&mutex);
   c_init(&cond);
 
@@ -127,8 +134,15 @@ int bano_open(struct inode *inode, struct file *filp) {
         if (c_wait(&cond, &mutex)) {
           c_broadcast(&cond);
           rc= -EINTR;
+          if (damas == 0) {
+            damas_pos = 0;
+          }
+          damas++;
           goto epilog;
         }
+      }
+      if (damas == 0) {
+        damas_pos = 0;
       }
       damas++;
       curr_size_d = 0;
@@ -142,8 +156,15 @@ int bano_open(struct inode *inode, struct file *filp) {
         if (c_wait(&cond, &mutex)) {
           c_broadcast(&cond);
           rc= -EINTR;
+          if (varones == 0) {
+            varones_pos = 0;
+          }
+          varones++;
           goto epilog;
         }
+      }
+      if (varones == 0) {
+        varones_pos = 0;
       }
       varones++;
       curr_size_v= 0;
@@ -268,33 +289,43 @@ ssize_t bano_write( struct file *filp, const char *buf, size_t count, loff_t *f_
   loff_t last;
 
   m_lock(&mutex);
-  last= *f_pos + count;
-  if (last > MAX_SIZE) {
-    count -= last-MAX_SIZE;
-  }
-
   dv = iminor(filp->f_inode);
   if (dv == 0) {
+    last = damas_pos + count;
+    if (last > MAX_SIZE) {
+      count -= last-MAX_SIZE;
+    }
+
+
     printk("<1>write %d bytes at (damas) %d\n", (int)count, (int)*f_pos);
-    copyFromUserResult = copy_from_user(buffer_d+*f_pos, buf, count);
+    copyFromUserResult = copy_from_user(buffer_d+damas_pos, buf, count);
+    /* Transfiriendo datos desde el espacio del usuario */
+    if (copyFromUserResult!=0) {
+      /* el valor de buf es una direccion invalida */
+      rc= -EFAULT;
+      goto epilog;
+    }
+
+    damas_pos += count;
+    curr_size_d= damas_pos;
   } else {
+    last = varones_pos + count;
+    if (last > MAX_SIZE) {
+      count -= last-MAX_SIZE;
+    }
     printk("<1>write %d bytes at (varones) %d\n", (int)count, (int)*f_pos);
-    copyFromUserResult = copy_from_user(buffer_v+*f_pos, buf, count);
+    copyFromUserResult = copy_from_user(buffer_v+varones_pos, buf, count);
+    /* Transfiriendo datos desde el espacio del usuario */
+    if (copyFromUserResult!=0) {
+      /* el valor de buf es una direccion invalida */
+      rc= -EFAULT;
+      goto epilog;
+    }
+
+    varones_pos += count;
+    curr_size_v = varones_pos;
   }
 
-  /* Transfiriendo datos desde el espacio del usuario */
-  if (copyFromUserResult!=0) {
-    /* el valor de buf es una direccion invalida */
-    rc= -EFAULT;
-    goto epilog;
-  }
-
-  *f_pos += count;
-  if (dv == 0) {
-    curr_size_d= *f_pos;
-  } else {
-    curr_size_v = *f_pos;
-  }
   rc= count;
   c_broadcast(&cond);
 
