@@ -48,15 +48,15 @@ int bano_major = 62;     /* Major number */
 /* Buffer to store data */
 #define MAX_SIZE 8192
 
-static char *buffer_v;
 static char *buffer_d;
-static ssize_t curr_size;
+static char *buffer_v;
+static ssize_t curr_size_d;
+static ssize_t curr_size_v;
 static int damas;
 static int varones;
-static int pend_open_damas;
-static int pend_open_varones;
 
-/* El mutex y la condicion para syncread */
+
+/* El mutex y la condicion para escribir */
 static KMutex mutex;
 static KCondition cond;
 
@@ -72,9 +72,8 @@ int bano_init(void) {
 
   damas = 0;
   varones = 0;
-  pend_open_damas= 0;
-  pend_open_varones = 0;
-  curr_size= 0;
+  curr_size_d = 0;
+  curr_size_v = 0;
   m_init(&mutex);
   c_init(&cond);
 
@@ -93,7 +92,7 @@ int bano_init(void) {
   }
   memset(buffer_v, 0, MAX_SIZE);
 
-  printk("<1>Inserting bano module varones y damas yei!\n");
+  printk("<1>Inserting bano module varones y damas\n");
   return 0;
 }
 
@@ -102,30 +101,206 @@ void bano_exit(void) {
   unregister_chrdev(bano_major, "damas");
   unregister_chrdev(bano_major, "varones");
 
-  /* Freeing buffer syncread */
-  /*if (syncread_buffer) {
-    kfree(syncread_buffer);
-  }*/
+  /* Freeing buffers */
+  if (buffer_d) {
+    kfree(buffer_d);
+  }
+  if (buffer_v) {
+    kfree(buffer_v);
+  }
 
   printk("<1>Removing bano module\n");
 }
 
 int bano_open(struct inode *inode, struct file *filp) {
-	return 0;
+	int rc= 0;
+  m_lock(&mutex);
+
+  if (filp->f_mode & FMODE_WRITE) {
+    int dv = iminor(filp->f_inode);
+    int rc;
+    if (dv == 0) {
+      // Esta entrando una dama
+      printk("<1>open request for write dama\n");
+      while (varones > 0) {
+        printk("no cacho 1");
+        if (c_wait(&cond, &mutex)) {
+          c_broadcast(&cond);
+          rc= -EINTR;
+          goto epilog;
+        }
+      }
+      damas++;
+      curr_size_d = 0;
+      printk("no cacho 2");
+      c_broadcast(&cond);
+      printk("<1>open for write successful damas: %d \n", damas);
+    } else {
+      // Esta entrando un varon
+      printk("<1>open request for write varon\n");
+      while (damas > 0) {
+        if (c_wait(&cond, &mutex)) {
+          c_broadcast(&cond);
+          rc= -EINTR;
+          goto epilog;
+        }
+      }
+      varones++;
+      curr_size_v= 0;
+      c_broadcast(&cond);
+      printk("<1>open for write successful varones: %d\n", varones);
+    }
+
+  }
+  else if (filp->f_mode & FMODE_READ) {
+    printk("<1>open for read\n");
+  }
+
+epilog:
+  m_unlock(&mutex);
+  return rc;
 }
 
 int bano_release(struct inode *inode, struct file *filp) {
-	return 0;
+	 m_lock(&mutex);
+
+  if (filp->f_mode & FMODE_WRITE) {
+    int dv = iminor(filp->f_inode);
+    if (dv == 0) {
+      // Esta saliendo una dama
+      printk("<1>close for write successful dama\n");
+      damas--;
+    } else {
+      // Esta saliendo un varon
+      printk("<1>close for write successful varon\n");
+      varones--;
+    }
+    c_broadcast(&cond);
+  }
+  else if (filp->f_mode & FMODE_READ) {
+    printk("<1>close for read \n");
+  }
+
+  m_unlock(&mutex);
+  return 0;
 }
 
 ssize_t bano_read(struct file *filp, char *buf, size_t count, loff_t *f_pos) {
-	ssize_t rc = -EFAULT;;
-	return rc;
+  ssize_t rc;
+  int dv;
+  m_lock(&mutex);
+
+
+  dv = iminor(filp->f_inode);
+  if (dv == 0) {
+    // Dama
+    while (curr_size_d <= *f_pos && damas > 0) {
+      printk("What? \n");
+      /* si el lector esta en el final del archivo pero hay un proceso
+       * escribiendo todavia en el archivo, el lector espera.
+       */
+      if (c_wait(&cond, &mutex)) {
+        printk("<1>read interrupted\n");
+        rc= -EINTR;
+        goto epilog;
+      }
+    }
+    printk("Curresize: %d\n", (int) curr_size_d); 
+    printk("Damas: %d\n", damas);
+
+    if (count > curr_size_d-*f_pos) {
+      count= curr_size_d-*f_pos;
+    }
+
+    printk("<1>read %d bytes at (damas) %d\n", (int)count, (int)*f_pos);
+
+    /* Transfiriendo datos hacia el espacio del usuario */
+    if (copy_to_user(buf, buffer_d+*f_pos, count)!=0) {
+      /* el valor de buf es una direccion invalida */
+      rc= -EFAULT;
+      goto epilog;
+    }
+
+  } else {
+    // Varon
+    while (curr_size_v <= *f_pos && varones > 0) {
+      printk("What? \n");
+      /* si el lector esta en el final del archivo pero hay un proceso
+       * escribiendo todavia en el archivo, el lector espera.
+       */
+      if (c_wait(&cond, &mutex)) {
+        printk("<1>read interrupted\n");
+        rc= -EINTR;
+        goto epilog;
+      }
+    }
+    printk("Curresize: %d\n", (int) curr_size_v); 
+    printk("Varones: %d\n", varones);
+
+    if (count > curr_size_v-*f_pos) {
+      count= curr_size_v-*f_pos;
+    }
+
+    printk("<1>read %d bytes at (varones) %d\n", (int)count, (int)*f_pos);
+
+    /* Transfiriendo datos hacia el espacio del usuario */
+    if (copy_to_user(buf, buffer_v+*f_pos, count)!=0) {
+      /* el valor de buf es una direccion invalida */
+      rc= -EFAULT;
+      goto epilog;
+    }
+  }
+
+
+  *f_pos+= count;
+  rc= count;
+
+epilog:
+  m_unlock(&mutex);
+  return rc;
 }
 
 ssize_t bano_write( struct file *filp, const char *buf, size_t count, loff_t *f_pos) {
-	ssize_t rc = -EFAULT;;
-	return rc;
+  int rc;
+  int copyFromUserResult;
+  int dv;
+
+  loff_t last;
+
+  m_lock(&mutex);
+  last= *f_pos + count;
+  if (last > MAX_SIZE) {
+    count -= last-MAX_SIZE;
+  }
+
+  dv = iminor(filp->f_inode);
+  if (dv == 0) {
+    printk("<1>write %d bytes at (damas) %d\n", (int)count, (int)*f_pos);
+    copyFromUserResult = copy_from_user(buffer_d+*f_pos, buf, count);
+  } else {
+    printk("<1>write %d bytes at (varones) %d\n", (int)count, (int)*f_pos);
+    copyFromUserResult = copy_from_user(buffer_v+*f_pos, buf, count);
+  }
+
+  /* Transfiriendo datos desde el espacio del usuario */
+  if (copyFromUserResult!=0) {
+    /* el valor de buf es una direccion invalida */
+    rc= -EFAULT;
+    goto epilog;
+  }
+
+  *f_pos += count;
+  if (dv == 0) {
+    curr_size_d= *f_pos;
+  } else {
+    curr_size_v = *f_pos;
+  }
+  rc= count;
+  c_broadcast(&cond);
+
+epilog:
+  m_unlock(&mutex);
+  return rc;
 }
 
 
